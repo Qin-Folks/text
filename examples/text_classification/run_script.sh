@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 if [ ! -d ".data" ]; then
     mkdir .data
 fi

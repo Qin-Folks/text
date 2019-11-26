@@ -41,6 +41,52 @@ def _csv_iterator(data_path, ngrams, yield_cls=False):
                 yield ngrams_iterator(tokens, ngrams)
 
 
+def get_cls_proportions(cls_dict):
+    cls_dict_prop = {}
+    a_sum = 0
+    for a_key in cls_dict.keys():
+        a_sum += cls_dict[a_key]
+
+    for a_key in cls_dict.keys():
+        cls_dict_prop[a_key] = cls_dict[a_key] / a_sum
+    return cls_dict_prop
+
+
+def create_unbalanced_data(data_list):
+    cls_dict = {}
+    for a_data in data_list:
+        if a_data[0] not in cls_dict.keys():
+            cls_dict[a_data[0]] = 1
+        else:
+            cls_dict[a_data[0]] += 1
+    max_cls_num = max(cls_dict.values())
+    print('max cls num: ', max_cls_num)
+
+    unb_data_list = []
+    cur_data_dict = {}
+    for data_idx in range(len(data_list)):
+        a_data = data_list[data_idx]
+        if a_data[0] % 2 == 0:
+            if a_data[0] not in cur_data_dict.keys() or cur_data_dict[a_data[0]] < max_cls_num:
+                pass
+            else:
+                continue
+        else:
+            if a_data[0] not in cur_data_dict.keys() or cur_data_dict[a_data[0]] < (max_cls_num / 10):
+                pass
+            else:
+                continue
+
+        unb_data_list.append(a_data)
+        if a_data[0] not in cur_data_dict.keys():
+            cur_data_dict[a_data[0]] = 1
+        else:
+            cur_data_dict[a_data[0]] += 1
+    print('cur data dict: ', cur_data_dict)
+    data_prop_dict = get_cls_proportions(cur_data_dict)
+    return unb_data_list, data_prop_dict
+
+
 def _create_data_from_iterator(vocab, iterator, include_unk):
     data = []
     labels = []
@@ -56,8 +102,12 @@ def _create_data_from_iterator(vocab, iterator, include_unk):
                 logging.info('Row contains no tokens.')
             data.append((cls, tokens))
             labels.append(cls)
+
             t.update(1)
-    return data, set(labels)
+
+    unb_data_list, data_prop_dict = create_unbalanced_data(data)
+    print('data prop dict: ', data_prop_dict)
+    return unb_data_list, set(labels), data_prop_dict
 
 
 class TextClassificationDataset(torch.utils.data.Dataset):
@@ -75,7 +125,7 @@ class TextClassificationDataset(torch.utils.data.Dataset):
 
     """
 
-    def __init__(self, vocab, data, labels):
+    def __init__(self, vocab, data, labels, cls_prop_dict):
         """Initiate text-classification dataset.
 
         Arguments:
@@ -95,6 +145,8 @@ class TextClassificationDataset(torch.utils.data.Dataset):
         self._data = data
         self._labels = labels
         self._vocab = vocab
+
+        self.cls_prop_dict = cls_prop_dict
 
     def __getitem__(self, i):
         return self._data[i]
@@ -131,15 +183,15 @@ def _setup_datasets(dataset_name, root='.data', ngrams=2, vocab=None, include_un
             raise TypeError("Passed vocabulary is not of type Vocab")
     logging.info('Vocab has {} entries'.format(len(vocab)))
     logging.info('Creating training data')
-    train_data, train_labels = _create_data_from_iterator(
+    train_data, train_labels, train_data_prop_dict = _create_data_from_iterator(
         vocab, _csv_iterator(train_csv_path, ngrams, yield_cls=True), include_unk)
     logging.info('Creating testing data')
-    test_data, test_labels = _create_data_from_iterator(
+    test_data, test_labels, test_data_prop_dict = _create_data_from_iterator(
         vocab, _csv_iterator(test_csv_path, ngrams, yield_cls=True), include_unk)
     if len(train_labels ^ test_labels) > 0:
         raise ValueError("Training and test labels don't match")
-    return (TextClassificationDataset(vocab, train_data, train_labels),
-            TextClassificationDataset(vocab, test_data, test_labels))
+    return (TextClassificationDataset(vocab, train_data, train_labels, train_data_prop_dict),
+            TextClassificationDataset(vocab, test_data, test_labels, test_data_prop_dict))
 
 
 def AG_NEWS(*args, **kwargs):

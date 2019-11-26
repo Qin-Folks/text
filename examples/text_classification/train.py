@@ -51,6 +51,20 @@ and text() functions.
 """
 
 
+def own_softmax(x, label_proportions):
+    if not isinstance(label_proportions, torch.Tensor):
+        label_proportions = torch.tensor(label_proportions).to('cuda')
+    x_exp = torch.exp(x)
+
+    # Switch these two
+    weighted_x_exp = x_exp * label_proportions
+    # weighted_x_exp = x_exp
+
+    x_exp_sum = torch.sum(weighted_x_exp, 1, keepdim=True)
+
+    return x_exp / x_exp_sum
+
+
 def train_and_valid(lr_, sub_train_, sub_valid_):
     r"""
     We use a SGD optimizer to train the model here and the learning rate
@@ -75,7 +89,8 @@ def train_and_valid(lr_, sub_train_, sub_valid_):
             optimizer.zero_grad()
             text, offsets, cls = text.to(device), offsets.to(device), cls.to(device)
             output = model(text, offsets)
-            loss = criterion(output, cls)
+            log_softmax_ = torch.log(own_softmax(output, train_label_prop) + 1e-5)
+            loss = criterion(log_softmax_, cls)
             loss.backward()
             optimizer.step()
             processed_lines = i + len(train_data) * epoch
@@ -97,20 +112,39 @@ def test(data_):
     Arguments:
         data_: the data used to train the model
     """
+    confusion_matrix = torch.zeros(train_label_prop.shape[0], train_label_prop.shape[0])
+
     data = DataLoader(data_, batch_size=batch_size, collate_fn=generate_batch)
     total_accuracy = []
     for text, offsets, cls in data:
         text, offsets, cls = text.to(device), offsets.to(device), cls.to(device)
         with torch.no_grad():
             output = model(text, offsets)
-            accuracy = (output.argmax(1) == cls).float().mean().item()
+            log_softmax_ = torch.log(own_softmax(output, train_label_prop) + 1e-5)
+            pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
+            accuracy = (log_softmax_.argmax(1) == cls).float().mean().item()
             total_accuracy.append(accuracy)
+
+            for t, p in zip(cls.view(-1), pred.view(-1)):
+                confusion_matrix[t.long(), p.long()] += 1
 
     # In case that nothing in the dataset
     if total_accuracy == []:
         return 0.0
 
+    print('confusion_matrix.sum(1): ', confusion_matrix.sum(1))
+    per_class_acc = confusion_matrix.diag() / confusion_matrix.sum(1)
+    print('per class accuracy: ', per_class_acc)
+    print('macro avg accuracy: ', torch.mean(per_class_acc))
+
     return sum(total_accuracy) / len(total_accuracy)
+
+
+def get_prop_tensor(label_count_dict):
+    rtn = []
+    for a_key in sorted(label_count_dict.keys()):
+        rtn.append(label_count_dict[a_key])
+    return torch.tensor(rtn).to(device=args.device)
 
 
 if __name__ == "__main__":
@@ -148,6 +182,7 @@ if __name__ == "__main__":
     parser.add_argument('--logging-level', default='WARNING',
                         help='logging level (default=WARNING)')
     args = parser.parse_args()
+    args.num_epochs = 20
 
     num_epochs = args.num_epochs
     embed_dim = args.embed_dim
@@ -180,12 +215,31 @@ if __name__ == "__main__":
         model = TextSentiment(len(train_dataset.get_vocab()),
                               embed_dim, len(train_dataset.get_labels())).to(device)
 
-    criterion = torch.nn.CrossEntropyLoss().to(device)
+    train_cls_prop_dict = train_dataset.cls_prop_dict
+    test_cls_prop_dict = test_dataset.cls_prop_dict
+    train_label_prop = get_prop_tensor(train_cls_prop_dict)
+    test_label_prop = get_prop_tensor(test_cls_prop_dict)
+
+    # criterion = torch.nn.CrossEntropyLoss().to(device)
+    criterion = torch.nn.NLLLoss().to(device)
 
     # split train_dataset into train and valid
     train_len = int(len(train_dataset) * split_ratio)
     sub_train_, sub_valid_ = \
         random_split(train_dataset, [train_len, len(train_dataset) - train_len])
+
+    # # Label statistics
+    # label_dict = {}
+    # all_train_data = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+    #                             collate_fn=generate_batch, num_workers=args.num_workers)
+    # for i, (text, offsets, cls) in enumerate(all_train_data):
+    #     for a_cls in cls:
+    #         if a_cls.item() not in label_dict.keys():
+    #             label_dict[a_cls.item()] = 1
+    #         else:
+    #             label_dict[a_cls.item()] += 1
+    # print(label_dict)
+
     train_and_valid(lr, sub_train_, sub_valid_)
     print("Test - Accuracy: {}".format(test(test_dataset)))
 
